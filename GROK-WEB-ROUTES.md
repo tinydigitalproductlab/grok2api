@@ -90,6 +90,49 @@ even though the source chunks contain them (13 / 10 hits in
   2026-10-27, but returned `429 upstream_quota_exhausted` on direct probe.
 - Do not conflate the two: the web protocol above is not the grok2api API.
 
+## Code-coverage audit against this fork's Web provider (2026-10-28)
+
+Checked against the fork's `backend/internal/infra/provider/web/` at head
+`e2fd7ab` (before this doc's updates). The core REA protocol is ALREADY
+implemented upstream — these are not new changes to invent:
+
+- `POST /rest/app-chat/conversations/new` for image edit:
+  `image.go` `generateImageEdit` (~line 878) with `buildImageEditPayload`
+  (~line 922): `modelName: imagine-image-edit`, `enableImageStreaming`,
+  `mediaGenInput.imageToImage` with prompt, inputAssets, aspectRatio.
+- Same endpoint for video: `video.go` `videoCreatePayload` (~line 546):
+  `modelName: imagine-video-gen`, `kind: CONVERSATION_KIND_IMAGINE`,
+  `mediaGenInput.textToVideo` with prompt, aspectRatio, duration,
+  resolutionName; `video.go` ~line 278 posts to `conversations/new`.
+- Websocket: `image.go` `imagineURL` (~line 1776) sets path
+  `/ws/imagine/listen`.
+- Quota: `quota.go` ~line 104 uses `/rest/media/imagine/quota_info`.
+- Catalog: `catalog.go` lines 27-31 list `grok-imagine-image-lite`,
+  `grok-imagine-image`, `grok-imagine-image-2.0`, `grok-imagine-image-edit`,
+  `grok-imagine-video`.
+
+NOT implemented in the Web provider (searched, non-test Go files only),
+and NOT implemented by this change, because they sit outside grok2api's
+OpenAI-compatible `/v1/*` surface and none is verified live here:
+
+- Media pipeline template routes (`/rest/media/pipeline/run|cancel|resume`,
+  template create/fork/publish/save/unsave/rollback)
+- Canvas / collection / folder / reference / search / segment routes
+- `/rest/media/video-sequence/create`, `/rest/media/video/caption`,
+  `/rest/media/video/music`, `/rest/media/video/upscale`
+- `/rest/media/imagine/generation_estimate`, `/rest/media/post/imagine-feed`,
+  `/rest/models/imagine/overrides`
+- Video kinds `referenceToVideo` and `videoExtension`, and edit options
+  `selectionRegions` / `reframe` — no matches in the provider code.
+- Live video is paywalled and live edit failed server-side on the test
+  account, so implementing any of the above from static bundle evidence
+  alone would be unverified. They are recorded here as future work, not
+  as working code.
+
+Companion file in this fork: `grok-media-rest-paths.txt` — 178 unique
+media/app-chat `/rest/` paths (deduped from the 363 file-prefixed lines
+in the local extraction), for reference only.
+
 ## What applying this to a fork means (and does not mean)
 
 - This document is the portable change set. It does not, by itself, implement
