@@ -142,6 +142,13 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	if err != nil {
 		return media.Job{}, err
 	}
+	// Web reference audio is voice_id-shaped for Console, while the web
+	// client expects audio asset IDs, so Web routes must not be selected
+	// for reference-audio jobs; the Web adapter rejects them as a final
+	// boundary, but routing them away here avoids a doomed job.
+	if len(input.ReferenceAudios) > 0 {
+		routes = filterOutWebVideoRoutes(routes)
+	}
 	allRefs := videoInputReferences(input.ImageURL, input.ReferenceURLs)
 	if err := s.validateVideoInputReferences(ctx, allRefs, "image"); err != nil {
 		return media.Job{}, err
@@ -268,6 +275,17 @@ func validateVideoRouteParameters(providerValue account.Provider, operation prov
 	return nil
 }
 
+func filterOutWebVideoRoutes(routes []model.Route) []model.Route {
+	kept := make([]model.Route, 0, len(routes))
+	for _, route := range routes {
+		if route.Provider == account.ProviderWeb {
+			continue
+		}
+		kept = append(kept, route)
+	}
+	return kept
+}
+
 func routesForVideoOperation(routes []model.Route, operation provider.VideoOperation) ([]model.Route, error) {
 	if operation == provider.VideoOperationGenerate {
 		return routes, nil
@@ -275,6 +293,13 @@ func routesForVideoOperation(routes []model.Route, operation provider.VideoOpera
 	compatible := make([]model.Route, 0, len(routes))
 	for _, candidate := range routes {
 		if candidate.Provider == account.ProviderConsole && strings.TrimSpace(candidate.UpstreamModel) == "grok-imagine-video" {
+			compatible = append(compatible, candidate)
+		}
+		// Web videoExtension is implemented in the Web provider, so Web
+		// grok-imagine-video routes are eligible for extend. Video edit
+		// (not extension) stays Console-only: the web client has no
+		// video-edit kind.
+		if operation == provider.VideoOperationExtend && candidate.Provider == account.ProviderWeb && strings.TrimSpace(candidate.UpstreamModel) == "grok-imagine-video" {
 			compatible = append(compatible, candidate)
 		}
 	}

@@ -106,15 +106,32 @@ func TestGenerateVideoImageAndReferenceKinds(t *testing.T) {
 		t.Fatalf("reference mediaReferences=%v", refs)
 	}
 
-	// reference audio and video extension stay rejected for Web
+	// reference audio stays rejected for Web (voice_id, not audio asset)
 	if _, err := adapter.GenerateVideo(context.Background(), provider.VideoRequest{
 		Credential: credential, Prompt: "x", Duration: 6, ReferenceAudios: []string{"voice_1"},
 	}); err == nil {
 		t.Fatal("reference audio for Web was accepted")
 	}
+	// video extension with a bare asset ID
+	result, err = adapter.GenerateVideo(context.Background(), provider.VideoRequest{
+		Credential: credential, Prompt: "continue", Duration: 6, VideoURL: "video_asset_1",
+	})
+	if err != nil || result.URL == "" {
+		t.Fatalf("extension video result=%#v err=%v", result, err)
+	}
+	mediaGenInput, _ = lastPayload["mediaGenInput"].(map[string]any)
+	videoExtension, _ := mediaGenInput["videoExtension"].(map[string]any)
+	if videoExtension == nil {
+		t.Fatalf("extension payload mediaGenInput=%v", mediaGenInput)
+	}
+	extAssets, _ := videoExtension["inputAssets"].([]any)
+	if len(extAssets) != 1 || extAssets[0] != "video_asset_1" {
+		t.Fatalf("extension inputAssets=%v", extAssets)
+	}
+	// video edit (not extension) stays Console-only for Web
 	if _, err := adapter.GenerateVideo(context.Background(), provider.VideoRequest{
-		Credential: credential, Prompt: "x", Duration: 6, VideoURL: "https://example.com/v.mp4",
+		Credential: credential, Prompt: "x", Duration: 6, Operation: provider.VideoOperationEdit, VideoURL: "video_asset_1",
 	}); err == nil {
-		t.Fatal("video URL extension for Web was accepted")
+		t.Fatal("video edit for Web was accepted")
 	}
 }

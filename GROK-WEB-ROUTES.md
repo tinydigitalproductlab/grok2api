@@ -145,6 +145,33 @@ Live upstream video is still NOT proven: this code has not run against
 real grok.com (browser UI video is paywalled on the test account), and
 the image-upload `file_source` mapping is the one unverified assumption.
 
+UPDATE 2 — videoExtension finished (second production push):
+Web `videoExtension` is now implemented in the same `video.go`
+(`resolveWebVideoExtensionSource`, `videoCreateExtensionPayload`):
+a bare asset ID is used as-is, while a URL/data-URI source video is
+downloaded (up to 256 MiB) and re-uploaded via V2 direct upload, and
+gateway `routesForVideoOperation` now admits Web grok-imagine-video
+routes for extend (edit stays Console-only — the web client has no
+video-edit kind). Reference-audio jobs are now routed away from Web in
+`CreateVideo` (`filterOutWebVideoRoutes`) instead of only failing in
+the adapter. The video-upload-via-V2 step is the new unverified
+assumption, same class as the image one.
+
+What is still genuinely NOT implemented, and why it is not in this push:
+- Image-edit options `selectionRegions` / `reframe` / `extractSubject` /
+  `draw` / `multiRegionEdits`: `ImageEditRequest` has no fields for
+  them, so adding them would invent a new public API surface, not just
+  fill in a provider payload. The bundle field shapes are recorded in
+  GROK-WEB-ROUTES.md's route inventory for when that API is designed.
+- Post-generation transforms (`/rest/media/video/caption|music|upscale`,
+  `/rest/media/video-sequence/create`, `generation_estimate`,
+  `imagine-feed`, `models/imagine/overrides`, pipeline/template/canvas/
+  collection/folder/reference/search/segment): no matching /v1 endpoint
+  exists in grok2api, so these need new endpoints, not a provider patch.
+- Live upstream proof for any Web video kind: still requires a live
+  call approval, and browser UI video remains paywalled on the test
+  account.
+
 Companion file in this fork: `grok-media-rest-paths.txt` — 178 unique
 media/app-chat `/rest/` paths (deduped from the 363 file-prefixed lines
 in the local extraction), for reference only.

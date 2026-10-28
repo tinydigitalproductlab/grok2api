@@ -259,8 +259,8 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	// to Console only. ReferenceAudios are also not mapped: the web
 	// client expects audio asset IDs, while VideoRequest.ReferenceAudios
 	// carries official voice IDs for Console.
-	if strings.TrimSpace(request.VideoURL) != "" {
-		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 视频延长需要 grok 视频资产 ID，URL 输入请使用 Build 或 Console Provider"))
+	if request.Operation == provider.VideoOperationEdit {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 没有视频编辑种类，视频编辑请使用 Console Provider"))
 	}
 	if len(request.ReferenceAudios) > 0 {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 参考音频需要音频资产 ID，voice_id 输入请使用 Console Provider"))
@@ -278,10 +278,16 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
 	defer lease.Release()
-	if len(videoSegments(request.Duration)) == 0 {
+	effectiveDuration := request.Duration
+	if strings.TrimSpace(request.VideoURL) != "" && effectiveDuration == 0 {
+		// Gateway defaults extend duration to 6s; direct adapter calls
+		// get the same default so extension is not a 0s request.
+		effectiveDuration = 6
+	}
+	if len(videoSegments(effectiveDuration)) == 0 {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("duration 必须在 1 到 15 秒之间"))
 	}
-	seconds := applyFreeWebVideoDurationCap(request.Duration, cfg.FreeVideoDurationCap, request.Credential)
+	seconds := applyFreeWebVideoDurationCap(effectiveDuration, cfg.FreeVideoDurationCap, request.Credential)
 	segments := videoSegments(seconds)
 	ratio := resolveAspectRatio(request.AspectRatio)
 	resolution := request.Resolution
@@ -290,6 +296,15 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	}
 	var payload map[string]any
 	switch {
+	case strings.TrimSpace(request.VideoURL) != "":
+		if strings.TrimSpace(request.Prompt) == "" {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("视频延长必须提供 prompt"))
+		}
+		source, sourceErr := a.resolveWebVideoExtensionSource(ctx, cfg, lease, token, request.VideoURL)
+		if sourceErr != nil {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, sourceErr)
+		}
+		payload = videoCreateExtensionPayload(request.Prompt, source, segments[0])
 	case strings.TrimSpace(request.ImageURL) != "":
 		assets, uploadErr := a.uploadWebVideoAssets(ctx, cfg, lease, token, []string{request.ImageURL})
 		if uploadErr != nil {
@@ -598,6 +613,49 @@ func (a *Adapter) uploadWebVideoAssets(ctx context.Context, cfg Config, lease *i
 		assets = append(assets, uploaded.MetadataID)
 	}
 	return assets, nil
+}
+
+// resolveWebVideoExtensionSource turns a VideoURL into the
+// sourceVideoAssetId the web client's videoExtension builder expects.
+// A bare value with no scheme is already an asset ID and is used as-is.
+// A URL or data URI is downloaded (up to 256 MiB) and re-uploaded via
+// the V2 direct-upload path, returning its fileMetadataId. The upload
+// step is the unverified mapping for video files: V2 upload is proven
+// for images in this codebase, not yet for video, and is called out in
+// GROK-WEB-ROUTES.md.
+func (a *Adapter) resolveWebVideoExtensionSource(ctx context.Context, cfg Config, lease *infraegress.Lease, token, rawURL string) (string, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", fmt.Errorf("视频延长需要 video 输入")
+	}
+	lower := strings.ToLower(trimmed)
+	if !strings.Contains(lower, "://") && !strings.HasPrefix(lower, "data:") {
+		return trimmed, nil
+	}
+	file, loadErr := a.loadChatFile(ctx, lease, trimmed, "source.mp4", 256<<20)
+	if loadErr != nil {
+		return "", loadErr
+	}
+	uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, file, cfg.BaseURL+"/imagine", "image_edit_upload", "video_extension_upload")
+	if uploadErr != nil {
+		return "", uploadErr
+	}
+	if uploaded.MetadataID == "" {
+		return "", fmt.Errorf("上传延长视频成功但上游未返回 fileMetadataId")
+	}
+	return uploaded.MetadataID, nil
+}
+
+// videoCreateExtensionPayload mirrors the web client's videoExtension
+// builder: prompt, inputAssets [source], duration. videoExtensionStartTime
+// is omitted because VideoRequest carries no start-time field.
+func videoCreateExtensionPayload(prompt, sourceAssetID string, seconds int) map[string]any {
+	videoExtension := map[string]any{
+		"prompt":      prompt,
+		"inputAssets": []string{sourceAssetID},
+		"duration":    seconds,
+	}
+	return videoCreatePayloadWithMediaGenInput(prompt, map[string]any{"videoExtension": videoExtension})
 }
 
 // videoCreateImagePayload mirrors the web client's imageToVideo builder:

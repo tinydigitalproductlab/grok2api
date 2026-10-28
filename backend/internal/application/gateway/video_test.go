@@ -161,6 +161,23 @@ func TestVideoEditRouteUsesResolvedUpstreamInsteadOfPublicName(t *testing.T) {
 	if _, err := routesForVideoOperation(routes[:1], provider.VideoOperationExtend); !errors.Is(err, ErrVideoOperationUnsupported) {
 		t.Fatalf("unsupported route error = %v", err)
 	}
+	// Extend also accepts Web grok-imagine-video routes now that the Web
+	// provider implements videoExtension; edit stays Console-only.
+	extendRoutes := []model.Route{
+		{ID: 1, PublicID: "grok-imagine-video", Provider: account.ProviderBuild, UpstreamModel: "grok-imagine-video"},
+		{ID: 2, PublicID: "grok-imagine-video", Provider: account.ProviderWeb, UpstreamModel: "grok-imagine-video"},
+		{ID: 3, PublicID: "company-video-editor", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-video"},
+	}
+	compatible, err = routesForVideoOperation(extendRoutes, provider.VideoOperationExtend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compatible) != 2 || compatible[0].ID != 2 || compatible[1].ID != 3 {
+		t.Fatalf("extend compatible routes = %#v", compatible)
+	}
+	if got := filterOutWebVideoRoutes(extendRoutes); len(got) != 2 || got[0].ID != 1 || got[1].ID != 3 {
+		t.Fatalf("filterOutWebVideoRoutes = %#v", got)
+	}
 }
 
 func TestVideoPricingLeavesUnmeasurableOperationsUnpriced(t *testing.T) {
