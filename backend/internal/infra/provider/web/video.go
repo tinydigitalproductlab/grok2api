@@ -17,6 +17,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
@@ -251,8 +252,21 @@ func boundWebMediaDiagnostic(value string, limit int) string {
 }
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
-	if strings.TrimSpace(request.ImageURL) != "" || len(request.ReferenceURLs) > 0 {
-		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 当前仅支持文本生视频；图片视频请使用 Build 或 Console Provider"))
+	// Web video kinds, from the grok.com web client (media-store-v2):
+	// textToVideo, imageToVideo, referenceToVideo. videoExtension is not
+	// implemented here: the web client needs a grok source-video asset ID,
+	// while VideoURL is a URL, and the gateway routes extend operations
+	// to Console only. ReferenceAudios are also not mapped: the web
+	// client expects audio asset IDs, while VideoRequest.ReferenceAudios
+	// carries official voice IDs for Console.
+	if strings.TrimSpace(request.VideoURL) != "" {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 视频延长需要 grok 视频资产 ID，URL 输入请使用 Build 或 Console Provider"))
+	}
+	if len(request.ReferenceAudios) > 0 {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 参考音频需要音频资产 ID，voice_id 输入请使用 Console Provider"))
+	}
+	if strings.TrimSpace(request.ImageURL) != "" && len(request.ReferenceURLs) > 0 {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("image 不能与 reference_images 同时使用"))
 	}
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
@@ -274,7 +288,29 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if resolution == "" {
 		resolution = "720p"
 	}
-	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
+	var payload map[string]any
+	switch {
+	case strings.TrimSpace(request.ImageURL) != "":
+		assets, uploadErr := a.uploadWebVideoAssets(ctx, cfg, lease, token, []string{request.ImageURL})
+		if uploadErr != nil {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, uploadErr)
+		}
+		payload = videoCreateImagePayload(request.Prompt, assets[0], ratio, resolution, segments[0])
+	case len(request.ReferenceURLs) > 0:
+		if strings.EqualFold(resolution, "1080p") {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("参考图视频 resolution 最高 720p"))
+		}
+		if strings.TrimSpace(request.Prompt) == "" {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("参考图视频必须提供 prompt"))
+		}
+		assets, uploadErr := a.uploadWebVideoAssets(ctx, cfg, lease, token, request.ReferenceURLs)
+		if uploadErr != nil {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, uploadErr)
+		}
+		payload = videoCreateReferencePayload(request.Prompt, assets, ratio, resolution, segments[0])
+	default:
+		payload = videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
+	}
 	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
@@ -537,6 +573,85 @@ func applyFreeWebVideoDurationCap(seconds, cap int, credential account.Credentia
 		return cap
 	}
 	return seconds
+}
+
+// uploadWebVideoAssets downloads each image (URL or data URI) and uploads
+// it through the same V2 direct-upload path the image-edit flow uses,
+// returning grok fileMetadataIds. The file_source matches the image-edit
+// flow because no separate video image-upload source is documented in
+// the web client bundle; this is the one unverified mapping in this
+// change and is called out in GROK-WEB-ROUTES.md.
+func (a *Adapter) uploadWebVideoAssets(ctx context.Context, cfg Config, lease *infraegress.Lease, token string, urls []string) ([]string, error) {
+	assets := make([]string, 0, len(urls))
+	for _, rawURL := range urls {
+		image, loadErr := a.loadChatImage(ctx, lease, rawURL, cfg.MaxInputImageBytes)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", "image_edit_upload", "video_image_upload")
+		if uploadErr != nil {
+			return nil, uploadErr
+		}
+		if uploaded.MetadataID == "" {
+			return nil, fmt.Errorf("上传视频图片成功但上游未返回 fileMetadataId")
+		}
+		assets = append(assets, uploaded.MetadataID)
+	}
+	return assets, nil
+}
+
+// videoCreateImagePayload mirrors the web client's imageToVideo builder:
+// prompt (omitted when empty, as the gateway allows prompt-less image
+// video), inputAssets, aspectRatio, duration, resolutionName, mode=custom.
+// useFirstFrame is omitted, which the client treats as true.
+func videoCreateImagePayload(prompt, assetID, ratio, resolution string, seconds int) map[string]any {
+	imageToVideo := map[string]any{
+		"inputAssets":    []string{assetID},
+		"aspectRatio":    ratio,
+		"duration":       seconds,
+		"resolutionName": resolution,
+		"mode":           "custom",
+	}
+	if strings.TrimSpace(prompt) != "" {
+		imageToVideo["prompt"] = prompt
+	}
+	return videoCreatePayloadWithMediaGenInput(prompt, map[string]any{"imageToVideo": imageToVideo})
+}
+
+// videoCreateReferencePayload mirrors the web client's referenceToVideo
+// builder. Uploaded assets serve as both inputAssets and mediaReferences,
+// and the first asset is the firstFrameAsset, which matches a
+// first-frame-led reference video. Keyframes, GIF source, and audio
+// assets are not supported by VideoRequest and are intentionally omitted.
+func videoCreateReferencePayload(prompt string, assets []string, ratio, resolution string, seconds int) map[string]any {
+	referenceToVideo := map[string]any{
+		"prompt":          prompt,
+		"inputAssets":     assets,
+		"mediaReferences": assets,
+		"firstFrameAsset": assets[0],
+		"aspectRatio":     ratio,
+		"duration":        seconds,
+		"resolutionName":  resolution,
+	}
+	return videoCreatePayloadWithMediaGenInput(prompt, map[string]any{"referenceToVideo": referenceToVideo})
+}
+
+func videoCreatePayloadWithMediaGenInput(prompt string, mediaGenInput map[string]any) map[string]any {
+	return map[string]any{
+		"modelName":            "imagine-video-gen",
+		"message":              strings.TrimSpace(prompt + " --mode=custom"),
+		"enableImageStreaming": true,
+		"enableSideBySide":     true,
+		"sendFinalMetadata":    true,
+		"responseMetadata": map[string]any{
+			"experiments": []any{},
+			"modelConfigOverride": map[string]any{
+				"modelMap": map[string]any{},
+			},
+		},
+		"mediaGenInput": mediaGenInput,
+		"kind":          "CONVERSATION_KIND_IMAGINE",
+	}
 }
 
 // videoCreatePayload mirrors the current Grok Imagine browser request.

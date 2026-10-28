@@ -123,11 +123,27 @@ OpenAI-compatible `/v1/*` surface and none is verified live here:
 - `/rest/media/imagine/generation_estimate`, `/rest/media/post/imagine-feed`,
   `/rest/models/imagine/overrides`
 - Video kinds `referenceToVideo` and `videoExtension`, and edit options
-  `selectionRegions` / `reframe` — no matches in the provider code.
-- Live video is paywalled and live edit failed server-side on the test
-  account, so implementing any of the above from static bundle evidence
-  alone would be unverified. They are recorded here as future work, not
-  as working code.
+  `selectionRegions` / `reframe` — no matches in the provider code
+  (as of the audit above).
+
+UPDATE — production code change, pushed to this fork (see commit history):
+Web `imageToVideo` and `referenceToVideo` are now implemented in
+`backend/internal/infra/provider/web/video.go` (`GenerateVideo`,
+`uploadWebVideoAssets`, `videoCreateImagePayload`,
+`videoCreateReferencePayload`), with the gateway Web image/reference
+block removed in `backend/internal/application/gateway/video.go` and
+its test updated. Images are uploaded via the existing V2 direct-upload
+path (same as image edit); reference assets serve as both `inputAssets`
+and `mediaReferences`, with the first asset as `firstFrameAsset`.
+`videoExtension` (needs a grok asset ID, not a URL) and
+`referenceAudios` (web expects audio asset IDs, not Console voice IDs)
+remain rejected in the Web adapter, with Console as the fallback.
+Tests: `backend/internal/infra/provider/web/video_kinds_test.go`
+(httptest, data-URI images) plus the full web and gateway packages pass
+(`go test ./internal/infra/provider/web/ ./internal/application/gateway/`).
+Live upstream video is still NOT proven: this code has not run against
+real grok.com (browser UI video is paywalled on the test account), and
+the image-upload `file_source` mapping is the one unverified assumption.
 
 Companion file in this fork: `grok-media-rest-paths.txt` — 178 unique
 media/app-chat `/rest/` paths (deduped from the 363 file-prefixed lines
