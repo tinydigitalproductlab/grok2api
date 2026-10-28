@@ -145,7 +145,27 @@ Live upstream video is still NOT proven: this code has not run against
 real grok.com (browser UI video is paywalled on the test account), and
 the image-upload `file_source` mapping is the one unverified assumption.
 
-UPDATE 2 — videoExtension finished (second production push):
+UPDATE 3 — live Web video fix, 2026-10-28 (file_source proven, image
+attachment fix pending live proof):
+The first live run through this code (Ruby Hart, image-to-video, 6s,
+720p) failed upstream with `Invalid file_source value:
+image_edit_upload` — the code had passed the stage name as the V2
+`file_source` field. The correct value is
+`IMAGINE_SELF_UPLOAD_FILE_SOURCE`, the same value the image-edit flow
+passes; that fix is in `video.go` (`uploadWebVideoAssets`,
+`resolveWebVideoExtensionSource`). After that fix the job completed
+live (`video_yEw7XJgaer2XOhyYVRiUkEgk`, Web provider, 6s, 720p) but the
+output was a generic 1280x720 mountain-lake video with no trace of the
+input image and the wrong aspect — upstream accepted the call but
+discarded the mediaGenInput asset. The follow-up fix in the same
+`video.go` therefore sends the uploaded asset as a top-level
+`imageAttachments` entry on the `conversations/new` call (the web
+client's inputs include imageAttachments alongside mediaGenInput) and
+sets `useFirstFrame: true` explicitly on `imageToVideo`, instead of
+leaving it to an omitted-field default. That attachment fix is
+NOT yet live-proven: the reference-path retry after the first video
+was blocked by `429 upstream_quota_exhausted`, so the next live run
+is the proof, not this code change.
 Web `videoExtension` is now implemented in the same `video.go`
 (`resolveWebVideoExtensionSource`, `videoCreateExtensionPayload`):
 a bare asset ID is used as-is, while a URL/data-URI source video is

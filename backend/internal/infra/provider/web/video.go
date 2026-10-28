@@ -592,10 +592,11 @@ func applyFreeWebVideoDurationCap(seconds, cap int, credential account.Credentia
 
 // uploadWebVideoAssets downloads each image (URL or data URI) and uploads
 // it through the same V2 direct-upload path the image-edit flow uses,
-// returning grok fileMetadataIds. The file_source matches the image-edit
-// flow because no separate video image-upload source is documented in
-// the web client bundle; this is the one unverified mapping in this
-// change and is called out in GROK-WEB-ROUTES.md.
+// returning grok fileMetadataIds. The file_source is IMAGINE_SELF_UPLOAD_FILE_SOURCE, the same value
+// the image-edit flow uses (uploadFileV2Direct's fileSource argument,
+// not the stage name). A live test on 2026-10-28 proved the literal
+// string "image_edit_upload" is rejected upstream with
+// "Invalid file_source value: image_edit_upload".
 func (a *Adapter) uploadWebVideoAssets(ctx context.Context, cfg Config, lease *infraegress.Lease, token string, urls []string) ([]string, error) {
 	assets := make([]string, 0, len(urls))
 	for _, rawURL := range urls {
@@ -603,7 +604,7 @@ func (a *Adapter) uploadWebVideoAssets(ctx context.Context, cfg Config, lease *i
 		if loadErr != nil {
 			return nil, loadErr
 		}
-		uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", "image_edit_upload", "video_image_upload")
+		uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, "video_image_upload")
 		if uploadErr != nil {
 			return nil, uploadErr
 		}
@@ -636,7 +637,7 @@ func (a *Adapter) resolveWebVideoExtensionSource(ctx context.Context, cfg Config
 	if loadErr != nil {
 		return "", loadErr
 	}
-	uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, file, cfg.BaseURL+"/imagine", "image_edit_upload", "video_extension_upload")
+	uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, file, cfg.BaseURL+"/imagine", imagineSelfUploadSource, "video_extension_upload")
 	if uploadErr != nil {
 		return "", uploadErr
 	}
@@ -655,13 +656,19 @@ func videoCreateExtensionPayload(prompt, sourceAssetID string, seconds int) map[
 		"inputAssets": []string{sourceAssetID},
 		"duration":    seconds,
 	}
-	return videoCreatePayloadWithMediaGenInput(prompt, map[string]any{"videoExtension": videoExtension})
+	return videoCreatePayloadWithMediaGenInput(prompt, map[string]any{"videoExtension": videoExtension}, nil)
 }
 
 // videoCreateImagePayload mirrors the web client's imageToVideo builder:
 // prompt (omitted when empty, as the gateway allows prompt-less image
 // video), inputAssets, aspectRatio, duration, resolutionName, mode=custom.
-// useFirstFrame is omitted, which the client treats as true.
+// useFirstFrame is set explicitly: the 2026-10-28 live run sent it omitted
+// and upstream returned a generic landscape video with no trace of the
+// input image, so the first-frame anchor is no longer left to a default.
+// The uploaded asset is also sent as a top-level imageAttachment: the
+// web client's conversations/new inputs include imageAttachments alongside
+// mediaGenInput, and a mediaGenInput asset with no matching attachment was
+// evidently discarded by upstream.
 func videoCreateImagePayload(prompt, assetID, ratio, resolution string, seconds int) map[string]any {
 	imageToVideo := map[string]any{
 		"inputAssets":    []string{assetID},
@@ -669,11 +676,12 @@ func videoCreateImagePayload(prompt, assetID, ratio, resolution string, seconds 
 		"duration":       seconds,
 		"resolutionName": resolution,
 		"mode":           "custom",
+		"useFirstFrame":  true,
 	}
 	if strings.TrimSpace(prompt) != "" {
 		imageToVideo["prompt"] = prompt
 	}
-	return videoCreatePayloadWithMediaGenInput(prompt, map[string]any{"imageToVideo": imageToVideo})
+	return videoCreatePayloadWithMediaGenInput(prompt, map[string]any{"imageToVideo": imageToVideo}, []string{assetID})
 }
 
 // videoCreateReferencePayload mirrors the web client's referenceToVideo
@@ -691,11 +699,11 @@ func videoCreateReferencePayload(prompt string, assets []string, ratio, resoluti
 		"duration":        seconds,
 		"resolutionName":  resolution,
 	}
-	return videoCreatePayloadWithMediaGenInput(prompt, map[string]any{"referenceToVideo": referenceToVideo})
+	return videoCreatePayloadWithMediaGenInput(prompt, map[string]any{"referenceToVideo": referenceToVideo}, assets)
 }
 
-func videoCreatePayloadWithMediaGenInput(prompt string, mediaGenInput map[string]any) map[string]any {
-	return map[string]any{
+func videoCreatePayloadWithMediaGenInput(prompt string, mediaGenInput map[string]any, imageAttachments []string) map[string]any {
+	payload := map[string]any{
 		"modelName":            "imagine-video-gen",
 		"message":              strings.TrimSpace(prompt + " --mode=custom"),
 		"enableImageStreaming": true,
@@ -710,6 +718,10 @@ func videoCreatePayloadWithMediaGenInput(prompt string, mediaGenInput map[string
 		"mediaGenInput": mediaGenInput,
 		"kind":          "CONVERSATION_KIND_IMAGINE",
 	}
+	if len(imageAttachments) > 0 {
+		payload["imageAttachments"] = imageAttachments
+	}
+	return payload
 }
 
 // videoCreatePayload mirrors the current Grok Imagine browser request.

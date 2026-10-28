@@ -79,6 +79,13 @@ func TestGenerateVideoImageAndReferenceKinds(t *testing.T) {
 	if imageToVideo["mode"] != "custom" {
 		t.Fatalf("image mode=%v", imageToVideo["mode"])
 	}
+	if imageToVideo["useFirstFrame"] != true {
+		t.Fatalf("image useFirstFrame=%v", imageToVideo["useFirstFrame"])
+	}
+	attachments, _ := lastPayload["imageAttachments"].([]any)
+	if len(attachments) != 1 || attachments[0] != "meta_test" {
+		t.Fatalf("image imageAttachments=%v", lastPayload["imageAttachments"])
+	}
 
 	// referenceToVideo
 	uploadCount = 0
